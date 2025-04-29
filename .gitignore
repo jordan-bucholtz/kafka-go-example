@@ -24,3 +24,8 @@ go.work.sum
 # Test data directories
 tests/e2e/test-data/
 /test-data/
+/data/output/
+/data/
+
+# Built binary
+shovel

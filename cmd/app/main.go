@@ -2,42 +2,54 @@ package main
 
 import (
 	"context"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/user/golang-test-kafka/internal/config"
 	"github.com/user/golang-test-kafka/internal/kafka"
+	"github.com/user/golang-test-kafka/internal/logging"
 	"github.com/user/golang-test-kafka/internal/service"
 	"github.com/user/golang-test-kafka/internal/storage"
 )
 
 func main() {
-	// Setup logger
-	logger := log.New(os.Stdout, "shovel: ", log.LstdFlags)
-	logger.Println("Starting Shovel - Kafka data transfer service...")
-
 	// Load configuration
 	cfg, err := config.Load()
 	if err != nil {
-		logger.Fatalf("Failed to load configuration: %v", err)
+		// Use standard log for initialization errors before logger is available
+		panic("Failed to load configuration: " + err.Error())
 	}
+
+	// Create logger
+	logConfig := logging.Config{
+		Level:      cfg.Logging.Level,
+		OutputPath: cfg.Logging.OutputPath,
+		Encoding:   cfg.Logging.Encoding,
+		DevMode:    cfg.Logging.DevMode,
+	}
+	logger, err := logging.New(logConfig)
+	if err != nil {
+		panic("Failed to create logger: " + err.Error())
+	}
+	defer logger.Sync()
+
+	logger.Info("Starting Shovel - Kafka data transfer service...")
 
 	// Create storage client
 	store, err := storage.NewStorage(cfg.Storage)
 	if err != nil {
-		logger.Fatalf("Failed to initialize storage: %v", err)
+		logger.Fatal("Failed to initialize storage", "error", err)
 	}
 	defer store.Close()
 
-	// Create service with stdout logging
+	// Create service with logger
 	svc := service.NewService(store, logger)
 
 	// Create Kafka consumer
-	consumer, err := kafka.NewConsumer(cfg.Kafka, svc.ProcessMessage)
+	consumer, err := kafka.NewConsumer(cfg.Kafka, svc.ProcessMessage, logger)
 	if err != nil {
-		logger.Fatalf("Failed to create Kafka consumer: %v", err)
+		logger.Fatal("Failed to create Kafka consumer", "error", err)
 	}
 	defer consumer.Close()
 
@@ -47,19 +59,22 @@ func main() {
 
 	// Start consuming messages in the background
 	go func() {
-		if err := consumer.Start(ctx); err != nil {
-			logger.Fatalf("Failed to start Kafka consumer: %v", err)
+		if err := consumer.Start(ctx); err != nil && ctx.Err() == nil {
+			logger.Fatal("Failed to start Kafka consumer", "error", err)
 		}
 	}()
 
-	logger.Printf("Shovel is running and consuming from topic: %s", cfg.Kafka.Topic)
+	logger.Info("Shovel is running and consuming from topic", "topic", cfg.Kafka.Topic)
 
 	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	<-sigChan
-	logger.Println("Received shutdown signal, gracefully shutting down...")
+	// Wait for termination signal
+	sig := <-sigChan
+	logger.Info("Received shutdown signal, gracefully shutting down...", "signal", sig.String())
+
+	// Trigger graceful shutdown
 	cancel()
-	logger.Println("Shovel service stopped")
+	logger.Info("Shovel service stopped")
 }

@@ -3,14 +3,13 @@ package kafka
 import (
 	"context"
 	"fmt"
-	"log"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/IBM/sarama"
 	"github.com/user/golang-test-kafka/internal/config"
+	"github.com/user/golang-test-kafka/internal/logging"
 )
 
 // MessageHandler is a function that processes Kafka messages
@@ -22,7 +21,7 @@ type Consumer struct {
 	client        sarama.ConsumerGroup
 	topics        []string
 	handler       MessageHandler
-	logger        *log.Logger
+	logger        *logging.Logger
 	ready         chan bool
 	consumerGroup string
 }
@@ -30,7 +29,7 @@ type Consumer struct {
 // ConsumerGroupHandler implements sarama.ConsumerGroupHandler
 type ConsumerGroupHandler struct {
 	handler    MessageHandler
-	logger     *log.Logger
+	logger     *logging.Logger
 	ready      chan bool
 	mu         sync.Mutex
 	errorCount map[string]int // Track errors per partition-topic
@@ -38,9 +37,7 @@ type ConsumerGroupHandler struct {
 }
 
 // NewConsumer creates a new Kafka consumer
-func NewConsumer(cfg config.KafkaConfig, handler MessageHandler) (*Consumer, error) {
-	logger := log.New(os.Stdout, "shovel-kafka: ", log.LstdFlags)
-
+func NewConsumer(cfg config.KafkaConfig, handler MessageHandler, logger *logging.Logger) (*Consumer, error) {
 	// Create Kafka consumer configuration
 	config := sarama.NewConfig()
 	config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRoundRobin
@@ -74,7 +71,9 @@ func NewConsumer(cfg config.KafkaConfig, handler MessageHandler) (*Consumer, err
 
 // Start begins consuming messages from Kafka
 func (c *Consumer) Start(ctx context.Context) error {
-	c.logger.Println("Starting Shovel Kafka consumer...")
+	c.logger.Info("Starting Shovel Kafka consumer...",
+		"topics", c.topics,
+		"consumerGroup", c.consumerGroup)
 
 	// Create a new handler with error tracking
 	handler := &ConsumerGroupHandler{
@@ -89,7 +88,7 @@ func (c *Consumer) Start(ctx context.Context) error {
 	for {
 		// Check if context was cancelled, signaling that the consumer should stop
 		if ctx.Err() != nil {
-			c.logger.Println("Context cancelled, stopping consumer")
+			c.logger.Info("Context cancelled, stopping consumer")
 			return nil
 		}
 
@@ -99,23 +98,23 @@ func (c *Consumer) Start(ctx context.Context) error {
 			if strings.Contains(err.Error(), "context canceled") {
 				return nil
 			}
-			c.logger.Printf("Error from consumer: %v", err)
+			c.logger.Error("Error from consumer", "error", err)
 			time.Sleep(time.Second) // Wait before retrying
 		}
 
 		// Check if consumer is ready
 		select {
 		case <-c.ready:
-			c.logger.Println("Consumer is ready")
+			c.logger.Info("Consumer is ready")
 		default:
-			c.logger.Println("Consumer is not ready, waiting...")
+			c.logger.Info("Consumer is not ready, waiting...")
 			select {
 			case <-c.ready:
-				c.logger.Println("Consumer is now ready")
+				c.logger.Info("Consumer is now ready")
 			case <-ctx.Done():
 				return nil
 			case <-time.After(10 * time.Second):
-				c.logger.Println("Timeout waiting for consumer to be ready, retrying...")
+				c.logger.Warn("Timeout waiting for consumer to be ready, retrying...")
 			}
 		}
 	}
@@ -123,13 +122,13 @@ func (c *Consumer) Start(ctx context.Context) error {
 
 // Close closes the consumer connection
 func (c *Consumer) Close() error {
-	c.logger.Println("Closing Kafka consumer")
+	c.logger.Info("Closing Kafka consumer")
 	return c.client.Close()
 }
 
 // Setup is run at the beginning of a new session, before ConsumeClaim
 func (h *ConsumerGroupHandler) Setup(sarama.ConsumerGroupSession) error {
-	h.logger.Println("Consumer group setup complete")
+	h.logger.Debug("Consumer group setup complete")
 	// Reset error counts on rebalance
 	h.mu.Lock()
 	h.errorCount = make(map[string]int)
@@ -141,7 +140,7 @@ func (h *ConsumerGroupHandler) Setup(sarama.ConsumerGroupSession) error {
 
 // Cleanup is run at the end of a session, once all ConsumeClaim goroutines have exited
 func (h *ConsumerGroupHandler) Cleanup(sarama.ConsumerGroupSession) error {
-	h.logger.Println("Consumer group cleanup complete")
+	h.logger.Debug("Consumer group cleanup complete")
 	h.ready = make(chan bool)
 	return nil
 }
@@ -153,9 +152,14 @@ func (h *ConsumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession,
 	// https://github.com/IBM/sarama/blob/main/consumer_group.go#L27-L29
 	for message := range claim.Messages() {
 		msgKey := fmt.Sprintf("%s-%d-%d", message.Topic, message.Partition, message.Offset)
+		msgLogger := h.logger.WithFields(map[string]interface{}{
+			"topic":     message.Topic,
+			"partition": message.Partition,
+			"offset":    message.Offset,
+			"key":       string(message.Key),
+		})
 
-		h.logger.Printf("Processing message: topic=%s partition=%d offset=%d key=%s",
-			message.Topic, message.Partition, message.Offset, string(message.Key))
+		msgLogger.Debug("Processing message")
 
 		// Process message with the handler
 		if err := h.handler(message.Value); err != nil {
@@ -167,21 +171,26 @@ func (h *ConsumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession,
 
 			// Determine if we should retry or skip based on error count
 			if retryCount <= h.maxRetries {
-				h.logger.Printf("Error processing message (attempt %d/%d): %v", retryCount, h.maxRetries, err)
+				msgLogger.Warn("Error processing message",
+					"error", err,
+					"attempt", retryCount,
+					"maxRetries", h.maxRetries)
 				// Do not mark message - it will be redelivered when the session ends
 				// This is a deliberate non-commit to retry
 				continue
 			}
 
-			h.logger.Printf("Max retries reached for message, skipping: %s", msgKey)
+			msgLogger.Error("Max retries reached for message, skipping",
+				"msgKey", msgKey,
+				"retries", retryCount,
+				"error", err)
 			// Mark message as processed after max retries to avoid endless loop
 			session.MarkMessage(message, "")
 			continue
 		}
 
 		// Message processed successfully
-		h.logger.Printf("Successfully processed and committed message: topic=%s partition=%d offset=%d",
-			message.Topic, message.Partition, message.Offset)
+		msgLogger.Info("Successfully processed and committed message")
 
 		// Mark message as processed
 		session.MarkMessage(message, "")

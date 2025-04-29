@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Config holds all configuration for the application
@@ -12,12 +13,13 @@ type Config struct {
 	Kafka   KafkaConfig   `json:"kafka"`
 	Storage StorageConfig `json:"storage"`
 	Server  ServerConfig  `json:"server"`
+	Logging LoggingConfig `json:"logging"`
 }
 
 // KafkaConfig holds Kafka-related configuration
 type KafkaConfig struct {
-	Brokers      []string `json:"brokers"`
-	Topic        string   `json:"topic"`
+	Brokers       []string `json:"brokers"`
+	Topic         string   `json:"topic"`
 	ConsumerGroup string   `json:"consumerGroup"`
 }
 
@@ -37,12 +39,20 @@ type ServerConfig struct {
 	Port int `json:"port"`
 }
 
+// LoggingConfig holds logging configuration
+type LoggingConfig struct {
+	Level      string `json:"level"`      // debug, info, warn, error
+	OutputPath string `json:"outputPath"` // stdout, stderr, or file path
+	Encoding   string `json:"encoding"`   // json or console
+	DevMode    bool   `json:"devMode"`    // if true, use development logger
+}
+
 // Load reads configuration from a JSON file and environment variables
 func Load() (*Config, error) {
 	cfg := &Config{
 		Kafka: KafkaConfig{
-			Brokers:      []string{"localhost:9092"},
-			Topic:        "test-topic",
+			Brokers:       []string{"localhost:9092"},
+			Topic:         "test-topic",
 			ConsumerGroup: "test-consumer-group",
 		},
 		Storage: StorageConfig{
@@ -51,6 +61,12 @@ func Load() (*Config, error) {
 		},
 		Server: ServerConfig{
 			Port: 8080,
+		},
+		Logging: LoggingConfig{
+			Level:      "info",
+			OutputPath: "stdout",
+			Encoding:   "json",
+			DevMode:    false,
 		},
 	}
 
@@ -75,13 +91,27 @@ func Load() (*Config, error) {
 
 	// Override with environment variables
 	if brokers := os.Getenv("KAFKA_BROKERS"); brokers != "" {
-		cfg.Kafka.Brokers = []string{brokers} // For simplicity, assuming comma-separated values are handled elsewhere
+		cfg.Kafka.Brokers = strings.Split(brokers, ",")
 	}
 	if topic := os.Getenv("KAFKA_TOPIC"); topic != "" {
 		cfg.Kafka.Topic = topic
 	}
 	if consumerGroup := os.Getenv("KAFKA_CONSUMER_GROUP"); consumerGroup != "" {
 		cfg.Kafka.ConsumerGroup = consumerGroup
+	}
+
+	// Logging environment variables
+	if level := os.Getenv("LOG_LEVEL"); level != "" {
+		cfg.Logging.Level = level
+	}
+	if output := os.Getenv("LOG_OUTPUT"); output != "" {
+		cfg.Logging.OutputPath = output
+	}
+	if encoding := os.Getenv("LOG_ENCODING"); encoding != "" {
+		cfg.Logging.Encoding = encoding
+	}
+	if devMode := os.Getenv("LOG_DEV_MODE"); devMode == "true" {
+		cfg.Logging.DevMode = true
 	}
 
 	// Ensure storage directory exists if using file storage
