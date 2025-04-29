@@ -1,0 +1,14 @@
+{
+  "kafka": {
+    "brokers": ["localhost:9092"],
+    "topic": "test-topic",
+    "consumerGroup": "test-consumer-group"
+  },
+  "storage": {
+    "type": "file",
+    "filePath": "data/output"
+  },
+  "server": {
+    "port": 8080
+  }
+}
